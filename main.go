@@ -1,16 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"github.com/davecgh/go-spew/spew"
 	resty "github.com/go-resty/resty/v2"
 	"github.com/samber/lo"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"regexp"
+	"syscall"
 	"time"
 )
 
@@ -34,108 +33,114 @@ func main() {
 	}
 
 	client := resty.New()
-	client.SetBaseURL("https://www.pivotaltracker.com/services/v5/projects/" + projectID)
+	client.SetBaseURL("https://www.pivotaltracker.com/services/v5")
 	client.Header.Set("X-TrackerToken", trackerToken)
 
-	simpleObject := func(path string) ContentsFetcher[genericJSON] {
-		return func() *FetchedContents[genericJSON] {
-			return fetchSimple[genericJSON](client, path)
+	client.SetPathParam("project_id", projectID)
+
+	d := Downloader{
+		client: client,
+	}
+
+	handleInterruptSignals(func() {
+		d.cancelRequested = true
+		logger.Println("cancel requested, stopping...")
+	})
+
+	pathkeys := PathKeys{}.withKey("project_id", projectID)
+	d.visitPaginated("/projects/{project_id}/stories", pathkeys, func(resp []genericJSON) {
+		for _, respItem := range resp {
+			pathkeys := pathkeys.withKey("story_id", getNumericKey(respItem, "id"))
+			d.visitObject("/projects/{project_id}/stories/{story_id}", pathkeys, nil)
 		}
-	}
-	simpleList := func(path string) ContentsFetcher[[]genericJSON] {
-		return func() *FetchedContents[[]genericJSON] {
-			return fetchSimple[[]genericJSON](client, path)
-		}
-	}
-	paginatedList := func(path string) ContentsFetcher[[]genericJSON] {
-		return func() *FetchedContents[[]genericJSON] {
-			return fetchPaginated(client, path)
-		}
-	}
-	sublistByKey := func(path string, parentIDs []parentIDs, parentParam ...string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
-		return func() *FetchedContents[[]Subcontent[[]genericJSON]] {
-			return getSubcontent[[]genericJSON](client, path, parentIDs, parentParam...)
-		}
-	}
-	subObjectByKey := func(path string, parentIDs []parentIDs, pathParam ...string) ContentsFetcher[[]Subcontent[genericJSON]] {
-		return func() *FetchedContents[[]Subcontent[genericJSON]] {
-			return getSubcontent[genericJSON](client, path, parentIDs, pathParam...)
-		}
-	}
-	parentIDs := func(parents []genericJSON, key string) []parentIDs {
-		return lo.Map(parents, func(item genericJSON, _ int) parentIDs {
-			return parentIDs{getNumericKey(item, key)}
-		})
-	}
-	sublist := func(parents []genericJSON, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
-		return sublistByKey(path, parentIDs(parents, "id"), parentParam)
-	}
-	out := func(file string) string {
-		return filepath.Join(outDir, file)
-	}
-
-	persistJson(simpleObject(""), out("project.json"))()
-	{
-		var stories []genericJSON
-		var storycomments []Subcontent[[]genericJSON]
-
-		capture(persistJson(paginatedList("/stories"), out("stories.json")), &stories)()
-		persistJson(subObjectByKey("/stories/{storyID}", parentIDs(stories, "id"), "storyID"), out("story_details.json"))()
-		capture(persistJson(sublist(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json")), &storycomments)()
-		persistJson(subObjectByKey("/stories/{storyID}/comments/{comment_id}", nestedParentKeys(storycomments), "storyID", "comment_id"), out("story_comment_details.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/tasks", "storyID"), out("story_tasks.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/owners", "storyID"), out("story_owners.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/reviews", "storyID"), out("story_reviews.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/blockers", "storyID"), out("story_blockers.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/transitions", "storyID"), out("story_transitions.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/activity", "storyID"), out("story_activity.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/labels", "storyID"), out("story_labels.json"))()
-	}
-
-	{
-		var iterations []genericJSON
-		capture(persistJson(paginatedList("/iterations"), out("iterations.json")), &iterations)()
-		// analytics are fetchable only from last 6 months. Ignore? contents not very useful
-		// persistJson(sublistByKey(iterations, "/iterations/{iteration_number}/analytics", "number", "iteration_number"), out("iteration_analytics.json"))()
-	}
-
-	{
-		var releases []genericJSON
-		capture(persistJson(paginatedList("/releases"), out("releases.json")), &releases)()
-		persistJson(subObjectByKey("/releases/{id}", parentIDs(releases, "id"), "id"), out("release_details.json"))()
-		persistJson(sublist(releases, "/releases/{id}/stories", "id"), out("releases_stories.json"))()
-		persistJson(simpleList("/labels"), out("labels.json"))()
-	}
-
-	{
-		var epics []genericJSON
-		capture(persistJson(simpleList("/epics"), out("epics.json")), &epics)()
-		persistJson(subObjectByKey("/epics/{id}", parentIDs(epics, "id"), "id"), out("epic_details.json"))()
-		var epiccomments []Subcontent[[]genericJSON]
-		capture(persistJson(sublist(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json")), &epiccomments)()
-		persistJson(sublistByKey("/epics/{epic_id}/comments/{comment_id}", nestedParentKeys(epiccomments), "epic_id", "comment_id"), out("epic_comments_details.json"))()
-		persistJson(sublist(epics, "/epics/{epic_id}/activity", "epic_id"), out("epic_activity.json"))()
-	}
-
-	persistJson(simpleList("/memberships"), out("memberships.json"))()
-	persistJson(paginatedList("/activity"), out("activity.json"))()
-
+	})
 	completionChecker.report()
+	logger.Println("done")
 }
 
-type parentIDs []string
+func handleInterruptSignals(done func()) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-func nestedParentKeys(subcontent []Subcontent[[]genericJSON]) []parentIDs {
-	result := []parentIDs{}
-	for _, sub := range subcontent {
-		for _, obj := range sub.Data {
-			keys := append(parentIDs{}, sub.ParentIDs...)
-			keys = append(keys, getNumericKey(obj, "id"))
-			result = append(result, keys)
-		}
+	go func() {
+		_ = <-sigs
+		done()
+	}()
+}
+
+type PathKeys map[string]string
+
+func (pk PathKeys) withKey(key, value string) PathKeys {
+	result := PathKeys{}
+	for k, v := range pk {
+		result[k] = v
 	}
+	result[key] = value
 	return result
+}
 
+type DownloadedContent struct {
+	url          string
+	pathTemplate string
+	PathKeys     PathKeys
+	Data         any
+}
+type Downloader struct {
+	downloadedData  []DownloadedContent
+	cancelRequested bool
+	client          *resty.Client
+}
+
+func (d *Downloader) visitPaginated(path string, keys PathKeys, downstreamHandler func([]genericJSON)) {
+	if d.cancelRequested {
+		return
+	}
+
+	contents, url := fetchPaginated(d.getRequest(keys), path)
+	d.addResult(path, url, contents)
+
+	downstreamHandler(contents)
+}
+
+func (d *Downloader) visitList(path string, keys PathKeys, downstreamHandler func(resp []genericJSON)) {
+	if d.cancelRequested {
+		return
+	}
+	var resp []genericJSON
+
+	getWithRetries(d.getRequest(keys), path)
+	d.addResult(path, req.URL, resp)
+	downstreamHandler(resp)
+}
+
+func (d *Downloader) visitObject(path string, keys PathKeys, downstreamHandler func(resp genericJSON)) {
+	if d.cancelRequested {
+		return
+	}
+	var resp genericJSON
+
+	getWithRetries(d.getRequest(keys), path)
+	d.addResult(path, req.URL, resp)
+
+	if downstreamHandler != nil {
+		downstreamHandler(resp)
+	}
+}
+
+func (d *Downloader) addResult(requestTemplate string, requestURL string, response any) {
+	d.downloadedData = append(d.downloadedData, DownloadedContent{
+		url:          requestURL,
+		pathTemplate: requestTemplate,
+		Data:         response,
+	})
+}
+
+func (d *Downloader) getRequest(keys PathKeys) *resty.Request {
+	req := d.client.R()
+	for k, v := range keys {
+		req.SetPathParam(k, v)
+	}
+	return req
 }
 
 type completionEntry struct {
@@ -197,22 +202,78 @@ func newCompletionChecker() *CompletionChecker {
 
 var completionChecker = newCompletionChecker()
 
-type FetchedContents[T any] struct {
-	Sources   []string
-	SavedDate time.Time
-	Data      T
+type genericJSON map[string]any
+
+func fetchPaginated(req *resty.Request, path string) ([]genericJSON, string) {
+	type paginatedResponse struct {
+		Pagination struct {
+			Total    int `json:"total"`
+			Limit    int `json:"limit"`
+			Offset   int `json:"offset"`
+			Returned int `json:"returned"`
+		} `json:"pagination"`
+		Data []genericJSON `json:"data"`
+	}
+
+	firstUrl := ""
+	var result []genericJSON
+	done := false
+	for !done {
+		respBody := paginatedResponse{}
+
+		req := req.
+			SetResult(&respBody).
+			SetQueryParam("offset", fmt.Sprintf("%d", len(result))).
+			SetQueryParam("envelope", "true")
+
+		getWithRetries(req, path)
+
+		if firstUrl == "" {
+			firstUrl = req.URL
+		}
+
+		result = append(result, respBody.Data...)
+		logger.Printf("fetched %d/%d\n", len(result), respBody.Pagination.Total)
+		done = len(result) == respBody.Pagination.Total
+		if DEBUG {
+			break
+		}
+	}
+	return result, firstUrl
 }
 
-type ContentsFetcher[T any] func() *FetchedContents[T]
+func getWithRetries(req *resty.Request, path string) {
+	var retryTimeout = time.Duration(0)
+	for {
+		resp, err := req.Get(path)
+		if err != nil {
+			log.Println("API call failed, will retry")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		logger.Printf("finished call: %s", req.URL)
 
-func capture[T any](fetcher ContentsFetcher[T], cache *T) ContentsFetcher[T] {
-	return func() *FetchedContents[T] {
-		results := fetcher()
-		*cache = results.Data
-		return results
+		completionChecker.observe(req.URL)
+
+		switch resp.StatusCode() {
+		case http.StatusOK:
+			return
+		case http.StatusTooManyRequests:
+			retryTimeout += 5 * time.Second
+			logger.Printf("server complaining about too many requests, sleeping for %s and retrying in a bit", retryTimeout)
+			time.Sleep(retryTimeout)
+
+		default:
+			logger.Fatalf("unexpected status (%s): %v", req.RawRequest.URL.String(), resp.Status())
+		}
 	}
 }
 
+func getNumericKey(obj genericJSON, key string) string {
+	return fmt.Sprintf("%d", int64(obj[key].(float64)))
+}
+
+/*
 func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) ContentsFetcher[T] {
 	return func() *FetchedContents[T] {
 		existingFileContents, err := os.ReadFile(destinationFile)
@@ -242,38 +303,6 @@ func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) Cont
 	}
 }
 
-type genericJSON map[string]any
-
-func fetchPaginated(client *resty.Client, path string) *FetchedContents[[]genericJSON] {
-	type paginatedResponse struct {
-		Pagination struct {
-			Total    int `json:"total"`
-			Limit    int `json:"limit"`
-			Offset   int `json:"offset"`
-			Returned int `json:"returned"`
-		} `json:"pagination"`
-		Data []genericJSON `json:"data"`
-	}
-
-	var result FetchedContents[[]genericJSON]
-	done := false
-	for !done {
-		respBody := paginatedResponse{}
-
-		getWithRetries(&result, client.R().
-			SetResult(&respBody).
-			SetQueryParam("offset", fmt.Sprintf("%d", len(result.Data))).
-			SetQueryParam("envelope", "true"), path)
-
-		result.Data = append(result.Data, respBody.Data...)
-		logger.Printf("fetched %d/%d\n", len(result.Data), respBody.Pagination.Total)
-		done = len(result.Data) == respBody.Pagination.Total
-		if DEBUG {
-			break
-		}
-	}
-	return &result
-}
 
 type requestFn func(*resty.Request)
 
@@ -303,9 +332,7 @@ type Subcontent[T any] struct {
 	Data      T
 }
 
-func getNumericKey(obj genericJSON, key string) string {
-	return fmt.Sprintf("%d", int64(obj[key].(float64)))
-}
+
 
 func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs, parentParams ...string) *FetchedContents[[]Subcontent[T]] {
 	//goland:noinspection GoBoolExpressions
@@ -335,32 +362,6 @@ func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs
 	return &result
 }
 
-func getWithRetries[T any](result *FetchedContents[T], req *resty.Request, path string, requestFn ...requestFn) {
-	for _, fn := range requestFn {
-		fn(req)
-	}
-	var retryTimeout = time.Duration(0)
-	for {
-		resp, err := req.Get(path)
-		if err != nil {
-			log.Println("API call failed, will retry")
-			time.Sleep(5 * time.Second)
-			continue
-		}
 
-		completionChecker.observe(req.URL)
-		result.Sources = append(result.Sources, resp.Request.URL)
 
-		switch resp.StatusCode() {
-		case http.StatusOK:
-			return
-		case http.StatusTooManyRequests:
-			retryTimeout += 5 * time.Second
-			logger.Printf("server complaining about too many requests, sleeping for %s and retrying in a bit", retryTimeout)
-			time.Sleep(retryTimeout)
-
-		default:
-			logger.Fatalf("unexpected status (%s): %v", req.RawRequest.URL.String(), resp.Status())
-		}
-	}
-}
+*/
