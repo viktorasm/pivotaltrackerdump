@@ -37,52 +37,70 @@ func main() {
 	client.SetBaseURL("https://www.pivotaltracker.com/services/v5/projects/" + projectID)
 	client.Header.Set("X-TrackerToken", trackerToken)
 
-	simpleList := func(path string) ContentsFetcher[[]genericJsonObject] {
-		return func() *FetchedContents[[]genericJsonObject] {
-			return fetchSimpleList(client, path)
+	simpleList := func(path string) ContentsFetcher[[]genericJSON] {
+		return func() *FetchedContents[[]genericJSON] {
+			return fetchSimple[[]genericJSON](client, path)
 		}
 	}
-	paginatedList := func(path string) ContentsFetcher[[]genericJsonObject] {
-		return func() *FetchedContents[[]genericJsonObject] {
+	paginatedList := func(path string) ContentsFetcher[[]genericJSON] {
+		return func() *FetchedContents[[]genericJSON] {
 			return fetchPaginated(client, path)
 		}
 	}
-	subitems := func(parents []genericJsonObject, path string, parentParam string) ContentsFetcher[[]Subitems] {
-		return func() *FetchedContents[[]Subitems] {
-			return getSubItems(client, parents, path, parentParam)
+	sublistByKey := func(parents []genericJSON, parentKey string, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
+		return func() *FetchedContents[[]Subcontent[[]genericJSON]] {
+			return getSubcontent[[]genericJSON](client, parents, path, parentKey, parentParam)
 		}
+	}
+	subObjectByKey := func(parents []genericJSON, parentKey string, path string, pathParam string) ContentsFetcher[[]Subcontent[genericJSON]] {
+		return func() *FetchedContents[[]Subcontent[genericJSON]] {
+			return getSubcontent[genericJSON](client, parents, path, parentKey, pathParam)
+		}
+	}
+	sublist := func(parents []genericJSON, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
+		return sublistByKey(parents, "id", path, parentParam)
 	}
 	out := func(file string) string {
 		return filepath.Join(outDir, file)
 	}
 
 	{
-		var stories []genericJsonObject
+		var stories []genericJSON
 		capture(persistJson(paginatedList("/stories"), out("stories.json")), &stories)()
-		persistJson(subitems(stories, "/stories/{storyID}/tasks", "storyID"), out("story_tasks.json"))()
-		persistJson(subitems(stories, "/stories/{storyID}/owners", "storyID"), out("story_owners.json"))()
-		persistJson(subitems(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json"))()
-		persistJson(subitems(stories, "/stories/{storyID}/reviews", "storyID"), out("story_reviews.json"))()
-		persistJson(subitems(stories, "/stories/{storyID}/blockers", "storyID"), out("story_blockers.json"))()
+		persistJson(subObjectByKey(stories, "id", "/stories/{storyID}", "storyID"), out("story_details.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/tasks", "storyID"), out("story_tasks.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/owners", "storyID"), out("story_owners.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/reviews", "storyID"), out("story_reviews.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/blockers", "storyID"), out("story_blockers.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/transitions", "storyID"), out("story_transitions.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/activity", "storyID"), out("story_activity.json"))()
+		persistJson(sublist(stories, "/stories/{storyID}/labels", "storyID"), out("story_labels.json"))()
 	}
 
-	persistJson(paginatedList("/story_transitions"), out("story_transitions.json"))()
-	persistJson(paginatedList("/iterations"), out("iterations.json"))()
+	{
+		var iterations []genericJSON
+		capture(persistJson(paginatedList("/iterations"), out("iterations.json")), &iterations)()
+		// analytics are fetchable only from last 6 months. Ignore? contents not very useful
+		// persistJson(sublistByKey(iterations, "/iterations/{iteration_number}/analytics", "number", "iteration_number"), out("iteration_analytics.json"))()
+	}
 
 	{
-		var releases []genericJsonObject
+		var releases []genericJSON
 		capture(persistJson(paginatedList("/releases"), out("releases.json")), &releases)()
-		persistJson(subitems(releases, "/releases/{id}/stories", "id"), out("releases_stories.json"))()
+		persistJson(sublist(releases, "/releases/{id}/stories", "id"), out("releases_stories.json"))()
 		persistJson(simpleList("/labels"), out("labels.json"))()
 	}
 
 	{
-		var epics []genericJsonObject
+		var epics []genericJSON
 		capture(persistJson(simpleList("/epics"), out("epics.json")), &epics)()
-		persistJson(subitems(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json"))()
+		persistJson(sublist(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json"))()
+		persistJson(sublist(epics, "/epics/{epic_id}/activity", "epic_id"), out("epic_activity.json"))()
 	}
 
 	persistJson(simpleList("/memberships"), out("memberships.json"))()
+	persistJson(paginatedList("/activity"), out("activity.json"))()
 
 	completionChecker.report()
 }
@@ -93,7 +111,7 @@ type completionEntry struct {
 	template string
 }
 
-// tracks if we processed all endpoints in wantedTrackerAPIEndpoints
+// tracks if we processed all endpoints in allTrackerAPIEndpoints
 type CompletionChecker struct {
 	items []*completionEntry
 }
@@ -126,8 +144,12 @@ func (c *CompletionChecker) report() {
 }
 
 func newCompletionChecker() *CompletionChecker {
+	wantedAPIEndpoints := lo.Filter(allTrackerAPIEndpoints, func(item string, index int) bool {
+		return !lo.Contains(ignoredEndpoints, item)
+	})
+
 	return &CompletionChecker{
-		items: lo.Map(wantedTrackerAPIEndpoints, func(urlTemplate string, index int) *completionEntry {
+		items: lo.Map(wantedAPIEndpoints, func(urlTemplate string, index int) *completionEntry {
 			substitutePathParams := regexp.MustCompile(`({[^/]+)}`)
 			urlRegexp := substitutePathParams.ReplaceAllString(urlTemplate, "[^/]+") + `($|\?.*)`
 
@@ -176,7 +198,6 @@ func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) Cont
 
 		logger.Println("fetching contents for", destinationFile)
 		contents := fetcher()
-		contents.SavedDate = time.Now()
 
 		marshalledContents, _ := json.MarshalIndent(contents, "", "  ")
 
@@ -188,9 +209,9 @@ func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) Cont
 	}
 }
 
-type genericJsonObject map[string]any
+type genericJSON map[string]any
 
-func fetchPaginated(client *resty.Client, path string) *FetchedContents[[]genericJsonObject] {
+func fetchPaginated(client *resty.Client, path string) *FetchedContents[[]genericJSON] {
 	type paginatedResponse struct {
 		Pagination struct {
 			Total    int `json:"total"`
@@ -198,10 +219,10 @@ func fetchPaginated(client *resty.Client, path string) *FetchedContents[[]generi
 			Offset   int `json:"offset"`
 			Returned int `json:"returned"`
 		} `json:"pagination"`
-		Data []genericJsonObject `json:"data"`
+		Data []genericJSON `json:"data"`
 	}
 
-	var result FetchedContents[[]genericJsonObject]
+	var result FetchedContents[[]genericJSON]
 	done := false
 	for !done {
 		respBody := paginatedResponse{}
@@ -229,49 +250,48 @@ func withPathParam(key string, value string) requestFn {
 	}
 }
 
-func fetchSimpleList(client *resty.Client, path string, requestFn ...requestFn) *FetchedContents[[]genericJsonObject] {
-	respBody := []genericJsonObject{}
+func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestFn) *FetchedContents[T] {
+	var respBody T
 
 	req := client.R().SetResult(&respBody)
 
-	result := FetchedContents[[]genericJsonObject]{}
+	result := FetchedContents[T]{}
 	getWithRetries(&result, req, path, requestFn...)
 
 	result.Sources = []string{req.URL}
 	result.Data = respBody
+	result.SavedDate = time.Now()
 
 	return &result
 }
 
-type Subitems struct {
+type Subcontent[T any] struct {
 	ParentID int64
-	Items    []genericJsonObject
+	Data     T
 }
 
-func getSubItems(client *resty.Client, parents []genericJsonObject, path string, parentParam string) *FetchedContents[[]Subitems] {
+func getSubcontent[T any](client *resty.Client, parents []genericJSON, path string, parentKey, parentParam string) *FetchedContents[[]Subcontent[T]] {
 	//goland:noinspection GoBoolExpressions
 	if DEBUG && len(parents) > 3 {
 		parents = parents[:3]
 	}
 
-	result := FetchedContents[[]Subitems]{}
+	result := FetchedContents[[]Subcontent[T]]{
+		SavedDate: time.Now(),
+	}
 
-	result.Data = lo.FilterMap(parents, func(item genericJsonObject, index int) (Subitems, bool) {
-		parentID := int64(item["id"].(float64))
+	result.Data = lo.Map(parents, func(parent genericJSON, index int) Subcontent[T] {
+		parentID := int64(parent[parentKey].(float64))
 		fmt.Printf("\rfetching items (%d/%d), parent ID %d", index+1, len(parents), parentID)
 
-		sublist := fetchSimpleList(client, path, withPathParam(parentParam, strconv.FormatInt(parentID, 10)))
+		subcontent := fetchSimple[T](client, path, withPathParam(parentParam, strconv.FormatInt(parentID, 10)))
 
-		if len(sublist.Data) == 0 {
-			return Subitems{}, false
-		}
+		result.Sources = append(result.Sources, subcontent.Sources...)
 
-		result.Sources = append(result.Sources, sublist.Sources...)
-
-		return Subitems{
+		return Subcontent[T]{
 			ParentID: parentID,
-			Items:    sublist.Data,
-		}, true
+			Data:     subcontent.Data,
+		}
 	})
 	return &result
 }
@@ -289,7 +309,7 @@ func getWithRetries[T any](result *FetchedContents[T], req *resty.Request, path 
 			continue
 		}
 
-		completionChecker.observe(resp.Request.URL)
+		completionChecker.observe(req.URL)
 		result.Sources = append(result.Sources, resp.Request.URL)
 
 		switch resp.StatusCode() {
