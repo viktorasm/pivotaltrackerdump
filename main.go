@@ -123,6 +123,7 @@ func main() {
 	}))
 	completionChecker.report()
 	d.save(cacheFile)
+	d.dumpCopies(outDir)
 	logger.Println("done")
 }
 
@@ -235,7 +236,11 @@ func (d *Downloader) getRequest(keys PathKeys) *resty.Request {
 }
 
 func (d *Downloader) save(file string) {
-	res, err := json.Marshal(d.downloadedData)
+	saveAsJSON(d.downloadedData, file)
+}
+
+func saveAsJSON(data any, file string) {
+	res, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -243,6 +248,7 @@ func (d *Downloader) save(file string) {
 	if err := os.WriteFile(file, res, 0644); err != nil {
 		logger.Fatal(err)
 	}
+
 }
 
 func (d *Downloader) load(file string) {
@@ -253,6 +259,21 @@ func (d *Downloader) load(file string) {
 
 	if err := json.Unmarshal(contents, &d.downloadedData); err != nil {
 		logger.Fatal(err)
+	}
+}
+
+func (d *Downloader) dumpCopies(outDir string) {
+	groups := lo.GroupBy(d.downloadedData, func(item *DownloadedContent) string {
+		return item.PathTemplate
+	})
+
+	nonAlphanumericRe := regexp.MustCompile("[^a-zA-Z0-9]+")
+	for pathTemplate, group := range groups {
+		fileName := nonAlphanumericRe.ReplaceAllString(pathTemplate, "_")
+		contents := lo.Map(group, func(content *DownloadedContent, _ int) any {
+			return content.Data
+		})
+		saveAsJSON(contents, filepath.Join(outDir, fileName))
 	}
 }
 
@@ -387,96 +408,3 @@ func getWithRetries(req *resty.Request, path string) {
 func getNumericKey(obj genericJSON, key string) string {
 	return fmt.Sprintf("%d", int64(obj[key].(float64)))
 }
-
-/*
-func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) ContentsFetcher[T] {
-	return func() *FetchedContents[T] {
-		existingFileContents, err := os.ReadFile(destinationFile)
-		if err == nil {
-			var contents FetchedContents[T]
-
-			err := json.Unmarshal(existingFileContents, &contents)
-			if err == nil {
-				logger.Printf("file %q exists, reusing cached contents", destinationFile)
-				for _, src := range contents.Sources {
-					completionChecker.observe(src)
-				}
-				return &contents
-			}
-		}
-
-		logger.Println("fetching contents for", destinationFile)
-		contents := fetcher()
-
-		marshalledContents, _ := json.MarshalIndent(contents, "", "  ")
-
-		if err := os.WriteFile(destinationFile, marshalledContents, 0644); err != nil {
-			log.Fatalf("error writing file %q: %v", destinationFile, err)
-		}
-		logger.Println("file created:", destinationFile)
-		return contents
-	}
-}
-
-
-type requestFn func(*resty.Request)
-
-func withPathParam(key string, value string) requestFn {
-	return func(r *resty.Request) {
-		r.SetPathParam(key, value)
-	}
-}
-
-func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestFn) *FetchedContents[T] {
-	var respBody T
-
-	req := client.R().SetResult(&respBody)
-
-	result := FetchedContents[T]{}
-	getWithRetries(&result, req, path, requestFn...)
-
-	result.Sources = []string{req.URL}
-	result.data = respBody
-	result.SavedDate = time.Now()
-
-	return &result
-}
-
-type Subcontent[T any] struct {
-	ParentIDs parentIDs
-	data      T
-}
-
-
-
-func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs, parentParams ...string) *FetchedContents[[]Subcontent[T]] {
-	//goland:noinspection GoBoolExpressions
-	if DEBUG && len(parents) > 3 {
-		parents = parents[:3]
-	}
-
-	result := FetchedContents[[]Subcontent[T]]{
-		SavedDate: time.Now(),
-	}
-
-	result.data = lo.Map(parents, func(parentKeyValues parentIDs, index int) Subcontent[T] {
-		fmt.Printf("\rfetching items (%d/%d), parent IDs %v", index+1, len(parents), spew.NewFormatter(parentKeyValues))
-
-		params := lo.Map(parentParams, func(key string, index int) requestFn {
-			return withPathParam(key, parentKeyValues[index])
-		})
-		subcontent := fetchSimple[T](client, path, params...)
-
-		result.Sources = append(result.Sources, subcontent.Sources...)
-
-		return Subcontent[T]{
-			ParentIDs: parentKeyValues,
-			data:      subcontent.data,
-		}
-	})
-	return &result
-}
-
-
-
-*/
