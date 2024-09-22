@@ -167,6 +167,9 @@ func persistJson[T any](fetcher ContentsFetcher[T], destinationFile string) Cont
 			err := json.Unmarshal(existingFileContents, &contents)
 			if err == nil {
 				logger.Printf("file %q exists, reusing cached contents", destinationFile)
+				for _, src := range contents.Sources {
+					completionChecker.observe(src)
+				}
 				return &contents
 			}
 		}
