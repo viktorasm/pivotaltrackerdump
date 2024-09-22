@@ -52,19 +52,19 @@ func main() {
 			return fetchPaginated(client, path)
 		}
 	}
-	sublistByKey := func(path string, parentIDs [][]string, parentParam ...string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
+	sublistByKey := func(path string, parentIDs []parentIDs, parentParam ...string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
 		return func() *FetchedContents[[]Subcontent[[]genericJSON]] {
 			return getSubcontent[[]genericJSON](client, path, parentIDs, parentParam...)
 		}
 	}
-	subObjectByKey := func(path string, parentIDs [][]string, pathParam ...string) ContentsFetcher[[]Subcontent[genericJSON]] {
+	subObjectByKey := func(path string, parentIDs []parentIDs, pathParam ...string) ContentsFetcher[[]Subcontent[genericJSON]] {
 		return func() *FetchedContents[[]Subcontent[genericJSON]] {
 			return getSubcontent[genericJSON](client, path, parentIDs, pathParam...)
 		}
 	}
-	parentIDs := func(parents []genericJSON, key string) [][]string {
-		return lo.Map(parents, func(item genericJSON, _ int) []string {
-			return []string{getNumericKey(item, key)}
+	parentIDs := func(parents []genericJSON, key string) []parentIDs {
+		return lo.Map(parents, func(item genericJSON, _ int) parentIDs {
+			return parentIDs{getNumericKey(item, key)}
 		})
 	}
 	sublist := func(parents []genericJSON, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
@@ -77,11 +77,14 @@ func main() {
 	persistJson(simpleObject(""), out("project.json"))()
 	{
 		var stories []genericJSON
+		var storycomments []Subcontent[[]genericJSON]
+
 		capture(persistJson(paginatedList("/stories"), out("stories.json")), &stories)()
 		persistJson(subObjectByKey("/stories/{storyID}", parentIDs(stories, "id"), "storyID"), out("story_details.json"))()
+		capture(persistJson(sublist(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json")), &storycomments)()
+		persistJson(subObjectByKey("/stories/{storyID}/comments/{comment_id}", nestedParentKeys(storycomments), "storyID", "comment_id"), out("story_comment_details.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/tasks", "storyID"), out("story_tasks.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/owners", "storyID"), out("story_owners.json"))()
-		persistJson(sublist(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/reviews", "storyID"), out("story_reviews.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/blockers", "storyID"), out("story_blockers.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/transitions", "storyID"), out("story_transitions.json"))()
@@ -108,7 +111,9 @@ func main() {
 		var epics []genericJSON
 		capture(persistJson(simpleList("/epics"), out("epics.json")), &epics)()
 		persistJson(subObjectByKey("/epics/{id}", parentIDs(epics, "id"), "id"), out("epic_details.json"))()
-		persistJson(sublist(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json"))()
+		var epiccomments []Subcontent[[]genericJSON]
+		capture(persistJson(sublist(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json")), &epiccomments)()
+		persistJson(sublistByKey("/epics/{epic_id}/comments/{comment_id}", nestedParentKeys(epiccomments), "epic_id", "comment_id"), out("epic_comments_details.json"))()
 		persistJson(sublist(epics, "/epics/{epic_id}/activity", "epic_id"), out("epic_activity.json"))()
 	}
 
@@ -116,6 +121,21 @@ func main() {
 	persistJson(paginatedList("/activity"), out("activity.json"))()
 
 	completionChecker.report()
+}
+
+type parentIDs []string
+
+func nestedParentKeys(subcontent []Subcontent[[]genericJSON]) []parentIDs {
+	result := []parentIDs{}
+	for _, sub := range subcontent {
+		for _, obj := range sub.Data {
+			keys := append(parentIDs{}, sub.ParentIDs...)
+			keys = append(keys, getNumericKey(obj, "id"))
+			result = append(result, keys)
+		}
+	}
+	return result
+
 }
 
 type completionEntry struct {
@@ -279,7 +299,7 @@ func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestF
 }
 
 type Subcontent[T any] struct {
-	ParentIDs []string
+	ParentIDs parentIDs
 	Data      T
 }
 
@@ -287,7 +307,7 @@ func getNumericKey(obj genericJSON, key string) string {
 	return fmt.Sprintf("%d", int64(obj[key].(float64)))
 }
 
-func getSubcontent[T any](client *resty.Client, path string, parents [][]string, parentParams ...string) *FetchedContents[[]Subcontent[T]] {
+func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs, parentParams ...string) *FetchedContents[[]Subcontent[T]] {
 	//goland:noinspection GoBoolExpressions
 	if DEBUG && len(parents) > 3 {
 		parents = parents[:3]
@@ -297,7 +317,7 @@ func getSubcontent[T any](client *resty.Client, path string, parents [][]string,
 		SavedDate: time.Now(),
 	}
 
-	result.Data = lo.Map(parents, func(parentKeyValues []string, index int) Subcontent[T] {
+	result.Data = lo.Map(parents, func(parentKeyValues parentIDs, index int) Subcontent[T] {
 		fmt.Printf("\rfetching items (%d/%d), parent IDs %v", index+1, len(parents), spew.NewFormatter(parentKeyValues))
 
 		params := lo.Map(parentParams, func(key string, index int) requestFn {
