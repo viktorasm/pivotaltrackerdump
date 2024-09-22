@@ -70,10 +70,15 @@ func main() {
 	d.visitPaginated("/projects/{project_id}/releases", pathkeys, 10, ":default,story_ids", nil)
 	d.visitPaginated("/projects/{project_id}/iterations", pathkeys, 10, "", nil)
 	visitList("/projects/{project_id}/epics", pathkeys, ":default,comments(:default,file_attachments,google_attachments,attachment_ids)", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
 		d.handleCommentAttachments(item)
+		visitList("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, "", nil)
 	}))
 	d.visitPaginated("/projects/{project_id}/stories", pathkeys, 10, ":default,comments(:default,file_attachments,google_attachments,attachment_ids),owners(:default),reviews(:default),tasks(:default),transitions(:default),blockers(:default),labels(:default)", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("story_id", getNumericKey(item, "id"))
+
 		d.handleCommentAttachments(item)
+		visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, "", nil)
 	}))
 	completionChecker.report()
 	d.save(cacheFile)
@@ -404,4 +409,8 @@ func getWithRetries(req *resty.Request, path string) {
 			logger.Fatalf("unexpected status (%s): %v", req.RawRequest.URL.String(), resp.Status())
 		}
 	}
+}
+
+func getNumericKey(obj genericJSON, key string) string {
+	return fmt.Sprintf("%d", int64(obj[key].(float64)))
 }
