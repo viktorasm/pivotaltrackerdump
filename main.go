@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"syscall"
 	"time"
@@ -62,66 +63,80 @@ func main() {
 	_ = visitObject
 
 	pathkeys := PathKeys{}.withKey("project_id", projectID)
-	//visitObject("/projects/{project_id}", pathkeys, "", nil)
-	//d.visitPaginated("/projects/{project_id}/activity", pathkeys, "", nil)
-	//visitList("/projects/{project_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
-	//	pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
-	//	visitObject("/projects/{project_id}/labels/{label_id}", pathkeys, "", nil)
-	//}))
-	//visitList("/projects/{project_id}/memberships", pathkeys, "", foreach(func(item genericJSON) {
-	//	pathkeys := pathkeys.withKey("membership_id", getNumericKey(item, "id"))
-	//	visitObject("/projects/{project_id}/memberships/{membership_id}", pathkeys, "", nil)
-	//}))
-	//d.visitPaginated("/projects/{project_id}/releases", pathkeys, "", foreach(func(item genericJSON) {
-	//	pathkeys := pathkeys.withKey("id", getNumericKey(item, "id"))
-	//	visitObject("/projects/{project_id}/releases/{id}", pathkeys, "", nil)
-	//	visitList("/projects/{project_id}/releases/{id}/stories", pathkeys, "", nil)
-	//}))
-	//d.visitPaginated("/projects/{project_id}/iterations", pathkeys, "", foreach(func(item genericJSON) {
-	//	pathkeys := pathkeys.withKey("iteration_number", getNumericKey(item, "number"))
-	//	visitObject("/projects/{project_id}/iterations/{iteration_number}", pathkeys, "", nil)
-	//}))
-	//visitList("/projects/{project_id}/epics", pathkeys, "", foreach(func(item genericJSON) {
-	//	pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
-	//	visitObject("/projects/{project_id}/epics/{epic_id}", pathkeys, "", nil)
-	//	d.visitPaginated("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, "", nil)
-	//	visitList("/projects/{project_id}/epics/{epic_id}/comments", pathkeys, "", foreach(func(item genericJSON) {
-	//		pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
-	//		visitObject("/projects/{project_id}/epics/{epic_id}/comments/{comment_id}", pathkeys, "", nil)
-	//	}))
-	//}))
+	visitObject("/projects/{project_id}", pathkeys, "", nil)
+	d.visitPaginated("/projects/{project_id}/activity", pathkeys, 10, "", nil)
+	visitList("/projects/{project_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/labels/{label_id}", pathkeys, "", nil)
+	}))
+	visitList("/projects/{project_id}/memberships", pathkeys, "", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("membership_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/memberships/{membership_id}", pathkeys, "", nil)
+	}))
+	d.visitPaginated("/projects/{project_id}/releases", pathkeys, 10, "", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/releases/{id}", pathkeys, "", nil)
+		visitList("/projects/{project_id}/releases/{id}/stories", pathkeys, "", nil)
+	}))
+	d.visitPaginated("/projects/{project_id}/iterations", pathkeys, 10, "", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("iteration_number", getNumericKey(item, "number"))
+		visitObject("/projects/{project_id}/iterations/{iteration_number}", pathkeys, "", nil)
+	}))
+	visitList("/projects/{project_id}/epics", pathkeys, "", foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/epics/{epic_id}", pathkeys, "", nil)
+		d.visitPaginated("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, 10, "", nil)
+		visitList("/projects/{project_id}/epics/{epic_id}/comments", pathkeys, "", foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/epics/{epic_id}/comments/{comment_id}", pathkeys, "", nil)
+		}))
+	}))
 	d.visitPaginated("/projects/{project_id}/stories", pathkeys, 5, ":default,comment_ids", foreach(func(item genericJSON) {
 		pathkeys := pathkeys.withKey("story_id", getNumericKey(item, "id"))
 
-		if item.getValueLength("comment_ids") > 0 {
+		if len(getListFieldValue(item, "comment_ids")) > 0 {
 			visitList("/projects/{project_id}/stories/{story_id}/comments", pathkeys, ":default,file_attachments,google_attachments,attachment_ids", foreach(func(item genericJSON) {
-				//pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
-				//visitObject("/projects/{project_id}/stories/{story_id}/comments/{comment_id}", pathkeys, ":default,file_attachment_ids,google_attachment_ids,attachment_ids", nil)
+				for _, attachment := range getListFieldValue(item, "file_attachments") {
+					filename, ok := getFieldValue(attachment, "filename")
+					if !ok {
+						log.Fatalf("could not get attachment filename")
+					}
+					downloadUrl, ok := getFieldValue(attachment, "download_url")
+					if !ok {
+						log.Fatalf("could not get attachment download url")
+					}
+					attachmentID, ok := getFieldValue(attachment, "id")
+					if !ok {
+						log.Fatalf("could not get attachment id")
+					}
+					attachmentIDStr := fmt.Sprintf("%d", int64(attachmentID.(float64)))
+					logger.Printf("attachment detected: %q %q %v", filename, downloadUrl, attachmentIDStr)
+				}
 			}))
 		}
-		//visitList("/projects/{project_id}/stories/{story_id}/owners", pathkeys, "", foreach(func(item genericJSON) {
-		//	//pathkeys := pathkeys.withKey("person_id", getNumericKey(item, "id"))
-		//	//visitObject("/projects/{project_id}/stories/{story_id}/owners/{person_id}", pathkeys, nil)
-		//}))
-		//visitList("/projects/{project_id}/stories/{story_id}/reviews", pathkeys, "", foreach(func(item genericJSON) {
-		//	pathkeys := pathkeys.withKey("review_id", getNumericKey(item, "id"))
-		//	visitObject("/projects/{project_id}/stories/{story_id}/reviews/{review_id}", pathkeys, "", nil)
-		//}))
-		//visitList("/projects/{project_id}/stories/{story_id}/tasks", pathkeys, "", foreach(func(item genericJSON) {
-		//	pathkeys := pathkeys.withKey("task_id", getNumericKey(item, "id"))
-		//	visitObject("/projects/{project_id}/stories/{story_id}/tasks/{task_id}", pathkeys, "", nil)
-		//}))
-		//visitList("/projects/{project_id}/stories/{story_id}/transitions", pathkeys, "", nil)
-		//visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, "", nil)
-		//visitList("/projects/{project_id}/stories/{story_id}/blockers", pathkeys, "", foreach(func(item genericJSON) {
-		//	pathkeys := pathkeys.withKey("blocker_id", getNumericKey(item, "id"))
-		//	visitObject("/projects/{project_id}/stories/{story_id}/blockers/{blocker_id}", pathkeys, "", nil)
-		//}))
-		//visitList("/projects/{project_id}/stories/{story_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
-		//	//pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
-		//	// giving 404?
-		//	// visitObject("/projects/{project_id}/stories/{story_id}/labels/{label_id}", pathkeys, nil)
-		//}))
+		visitList("/projects/{project_id}/stories/{story_id}/owners", pathkeys, "", foreach(func(item genericJSON) {
+			//pathkeys := pathkeys.withKey("person_id", getNumericKey(item, "id"))
+			//visitObject("/projects/{project_id}/stories/{story_id}/owners/{person_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/reviews", pathkeys, "", foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("review_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/reviews/{review_id}", pathkeys, "", nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/tasks", pathkeys, "", foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("task_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/tasks/{task_id}", pathkeys, "", nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/transitions", pathkeys, "", nil)
+		visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, "", nil)
+		visitList("/projects/{project_id}/stories/{story_id}/blockers", pathkeys, "", foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("blocker_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/blockers/{blocker_id}", pathkeys, "", nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
+			//pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
+			// giving 404?
+			// visitObject("/projects/{project_id}/stories/{story_id}/labels/{label_id}", pathkeys, nil)
+		}))
 	}))
 	completionChecker.report()
 	d.save(cacheFile)
@@ -343,16 +358,24 @@ var completionChecker = newCompletionChecker()
 
 type genericJSON map[string]any
 
-func (j genericJSON) getValueLength(key string) int {
-	value, ok := j[key]
+func getFieldValue(obj any, key string) (any, bool) {
+	value := reflect.ValueOf(obj).MapIndex(reflect.ValueOf(key))
+	if value.IsValid() {
+		return value.Interface(), true
+	}
+	return nil, false
+}
+
+func getListFieldValue(obj any, key string) []any {
+	value, ok := getFieldValue(obj, key)
 	if !ok {
-		return 0
+		return nil
 	}
 	listValue, ok := value.([]any)
 	if !ok {
-		return 0
+		return nil
 	}
-	return len(listValue)
+	return listValue
 }
 
 func makePaginatedFetcher(limit int) func(req *resty.Request, path string) []genericJSON {
