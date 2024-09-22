@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
@@ -42,21 +44,94 @@ func main() {
 	d := Downloader{
 		client: client,
 	}
+	cacheFile := filepath.Join(outDir, "cache.json")
+	d.load(cacheFile)
 
 	handleInterruptSignals(func() {
 		d.cancelRequested = true
 		logger.Println("cancel requested, stopping...")
 	})
 
+	visitList := func(path string, keys PathKeys, downstream func([]genericJSON)) {
+		visit[[]genericJSON](&d, path, keys, fetchSimple, downstream)
+	}
+	_ = visitList
+	visitObject := func(path string, keys PathKeys, downstream func(genericJSON)) {
+		visit[genericJSON](&d, path, keys, fetchSimple, downstream)
+	}
+
 	pathkeys := PathKeys{}.withKey("project_id", projectID)
-	d.visitPaginated("/projects/{project_id}/stories", pathkeys, func(resp []genericJSON) {
-		for _, respItem := range resp {
-			pathkeys := pathkeys.withKey("story_id", getNumericKey(respItem, "id"))
-			d.visitObject("/projects/{project_id}/stories/{story_id}", pathkeys, nil)
-		}
-	})
+	visitObject("/projects/{project_id}", pathkeys, nil)
+	d.visitPaginated("/projects/{project_id}/activity", pathkeys, nil)
+	visitList("/projects/{project_id}/labels", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/labels/{label_id}", pathkeys, nil)
+	}))
+	visitList("/projects/{project_id}/memberships", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("membership_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/memberships/{membership_id}", pathkeys, nil)
+	}))
+	d.visitPaginated("/projects/{project_id}/releases", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/releases/{id}", pathkeys, nil)
+		visitList("/projects/{project_id}/releases/{id}/stories", pathkeys, nil)
+	}))
+	d.visitPaginated("/projects/{project_id}/iterations", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("iteration_number", getNumericKey(item, "number"))
+		visitObject("/projects/{project_id}/iterations/{iteration_number}", pathkeys, nil)
+	}))
+	visitList("/projects/{project_id}/epics", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/epics/{epic_id}", pathkeys, nil)
+		d.visitPaginated("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, nil)
+		visitList("/projects/{project_id}/epics/{epic_id}/comments", pathkeys, foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/epics/{epic_id}/comments/{comment_id}", pathkeys, nil)
+		}))
+
+	}))
+	d.visitPaginated("/projects/{project_id}/stories", pathkeys, foreach(func(item genericJSON) {
+		pathkeys := pathkeys.withKey("story_id", getNumericKey(item, "id"))
+		visitObject("/projects/{project_id}/stories/{story_id}", pathkeys, nil)
+		visitList("/projects/{project_id}/stories/{story_id}/owners", pathkeys, foreach(func(item genericJSON) {
+			//pathkeys := pathkeys.withKey("person_id", getNumericKey(item, "id"))
+			//visitObject("/projects/{project_id}/stories/{story_id}/owners/{person_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/reviews", pathkeys, foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("review_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/reviews/{review_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/tasks", pathkeys, foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("task_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/tasks/{task_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/transitions", pathkeys, nil)
+		visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, nil)
+		visitList("/projects/{project_id}/stories/{story_id}/blockers", pathkeys, foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("blocker_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/blockers/{blocker_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/comments", pathkeys, foreach(func(item genericJSON) {
+			pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
+			visitObject("/projects/{project_id}/stories/{story_id}/comments/{comment_id}", pathkeys, nil)
+		}))
+		visitList("/projects/{project_id}/stories/{story_id}/labels", pathkeys, foreach(func(item genericJSON) {
+			//pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
+			// giving 404?
+			// visitObject("/projects/{project_id}/stories/{story_id}/labels/{label_id}", pathkeys, nil)
+		}))
+	}))
 	completionChecker.report()
+	d.save(cacheFile)
 	logger.Println("done")
+}
+
+func foreach(f func(item genericJSON)) func(itemList []genericJSON) {
+	return func(itemList []genericJSON) {
+		for _, item := range itemList {
+			f(item)
+		}
+	}
 }
 
 func handleInterruptSignals(done func()) {
@@ -80,58 +155,73 @@ func (pk PathKeys) withKey(key, value string) PathKeys {
 	return result
 }
 
+func (pk PathKeys) equal(keys PathKeys) bool {
+	if len(pk) != len(keys) {
+		return false
+	}
+	for k, v := range pk {
+		if v != keys[k] {
+			return false
+		}
+	}
+	return true
+}
+
 type DownloadedContent struct {
-	pathTemplate string
-	keys         PathKeys
-	PathKeys     PathKeys
+	PathTemplate string
+	Keys         PathKeys
 	Data         any
 }
 type Downloader struct {
-	downloadedData  []DownloadedContent
+	downloadedData  []*DownloadedContent
 	cancelRequested bool
 	client          *resty.Client
 }
 
 func (d *Downloader) visitPaginated(path string, keys PathKeys, downstreamHandler func([]genericJSON)) {
-	if d.cancelRequested {
-		return
-	}
-
-	contents := fetchPaginated(d.getRequest(keys), path)
-	d.addResult(path, keys, contents)
-
-	downstreamHandler(contents)
+	visit[[]genericJSON](d, path, keys, fetchPaginated, downstreamHandler)
 }
 
-func (d *Downloader) visitList(path string, keys PathKeys, downstreamHandler func(resp []genericJSON)) {
+func visit[T any](d *Downloader, path string, keys PathKeys, fetcher func(req *resty.Request, path string) T, downstreamHandler func(resp T)) {
 	if d.cancelRequested {
 		return
 	}
-	var resp []genericJSON
 
-	getWithRetries(d.getRequest(keys), path)
-	d.addResult(path, keys, resp)
-	downstreamHandler(resp)
-}
-
-func (d *Downloader) visitObject(path string, keys PathKeys, downstreamHandler func(resp genericJSON)) {
-	if d.cancelRequested {
-		return
+	var resp T
+	isCached := false
+	for _, cached := range d.downloadedData {
+		if cached.PathTemplate == path && cached.Keys.equal(keys) {
+			recodeJsonAs(cached.Data, &resp)
+			isCached = true
+			completionChecker.observe(cached.PathTemplate)
+			break
+		}
 	}
-	var resp genericJSON
-
-	getWithRetries(d.getRequest(keys), path)
-	d.addResult(path, keys, resp)
+	if !isCached {
+		resp = fetcher(d.getRequest(keys), path)
+		d.addResult(path, keys, resp)
+	}
 
 	if downstreamHandler != nil {
 		downstreamHandler(resp)
 	}
 }
 
+func recodeJsonAs[T any](data any, t *T) {
+	marshalledContent, err := json.Marshal(data)
+	if err != nil {
+		panic(err)
+	}
+	err = json.Unmarshal(marshalledContent, t)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (d *Downloader) addResult(requestTemplate string, keys PathKeys, response any) {
-	d.downloadedData = append(d.downloadedData, DownloadedContent{
-		keys:         keys,
-		pathTemplate: requestTemplate,
+	d.downloadedData = append(d.downloadedData, &DownloadedContent{
+		Keys:         keys,
+		PathTemplate: requestTemplate,
 		Data:         response,
 	})
 }
@@ -142,6 +232,28 @@ func (d *Downloader) getRequest(keys PathKeys) *resty.Request {
 		req.SetPathParam(k, v)
 	}
 	return req
+}
+
+func (d *Downloader) save(file string) {
+	res, err := json.Marshal(d.downloadedData)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
+	if err := os.WriteFile(file, res, 0644); err != nil {
+		logger.Fatal(err)
+	}
+}
+
+func (d *Downloader) load(file string) {
+	contents, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+
+	if err := json.Unmarshal(contents, &d.downloadedData); err != nil {
+		logger.Fatal(err)
+	}
 }
 
 type completionEntry struct {
@@ -238,6 +350,13 @@ func fetchPaginated(req *resty.Request, path string) []genericJSON {
 	return result
 }
 
+func fetchSimple[T any](req *resty.Request, path string) T {
+	var resp T
+	req.SetResult(&resp)
+	getWithRetries(req, path)
+	return resp
+}
+
 func getWithRetries(req *resty.Request, path string) {
 	var retryTimeout = time.Duration(0)
 	for {
@@ -317,7 +436,7 @@ func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestF
 	getWithRetries(&result, req, path, requestFn...)
 
 	result.Sources = []string{req.URL}
-	result.Data = respBody
+	result.data = respBody
 	result.SavedDate = time.Now()
 
 	return &result
@@ -325,7 +444,7 @@ func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestF
 
 type Subcontent[T any] struct {
 	ParentIDs parentIDs
-	Data      T
+	data      T
 }
 
 
@@ -340,7 +459,7 @@ func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs
 		SavedDate: time.Now(),
 	}
 
-	result.Data = lo.Map(parents, func(parentKeyValues parentIDs, index int) Subcontent[T] {
+	result.data = lo.Map(parents, func(parentKeyValues parentIDs, index int) Subcontent[T] {
 		fmt.Printf("\rfetching items (%d/%d), parent IDs %v", index+1, len(parents), spew.NewFormatter(parentKeyValues))
 
 		params := lo.Map(parentParams, func(key string, index int) requestFn {
@@ -352,7 +471,7 @@ func getSubcontent[T any](client *resty.Client, path string, parents []parentIDs
 
 		return Subcontent[T]{
 			ParentIDs: parentKeyValues,
-			Data:      subcontent.Data,
+			data:      subcontent.data,
 		}
 	})
 	return &result
