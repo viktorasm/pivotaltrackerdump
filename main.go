@@ -65,78 +65,21 @@ func main() {
 	pathkeys := PathKeys{}.withKey("project_id", projectID)
 	visitObject("/projects/{project_id}", pathkeys, "", nil)
 	d.visitPaginated("/projects/{project_id}/activity", pathkeys, 10, "", nil)
-	visitList("/projects/{project_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
-		visitObject("/projects/{project_id}/labels/{label_id}", pathkeys, "", nil)
-	}))
-	visitList("/projects/{project_id}/memberships", pathkeys, "", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("membership_id", getNumericKey(item, "id"))
-		visitObject("/projects/{project_id}/memberships/{membership_id}", pathkeys, "", nil)
-	}))
-	d.visitPaginated("/projects/{project_id}/releases", pathkeys, 10, "", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("id", getNumericKey(item, "id"))
-		visitObject("/projects/{project_id}/releases/{id}", pathkeys, "", nil)
-		visitList("/projects/{project_id}/releases/{id}/stories", pathkeys, "", nil)
-	}))
-	d.visitPaginated("/projects/{project_id}/iterations", pathkeys, 10, "", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("iteration_number", getNumericKey(item, "number"))
-		visitObject("/projects/{project_id}/iterations/{iteration_number}", pathkeys, "", nil)
-	}))
-	visitList("/projects/{project_id}/epics", pathkeys, "", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
-		visitObject("/projects/{project_id}/epics/{epic_id}", pathkeys, "", nil)
-		d.visitPaginated("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, 10, "", nil)
-		visitList("/projects/{project_id}/epics/{epic_id}/comments", pathkeys, "", foreach(func(item genericJSON) {
-			pathkeys := pathkeys.withKey("comment_id", getNumericKey(item, "id"))
-			visitObject("/projects/{project_id}/epics/{epic_id}/comments/{comment_id}", pathkeys, "", nil)
-		}))
-	}))
-	d.visitPaginated("/projects/{project_id}/stories", pathkeys, 5, ":default,comment_ids", foreach(func(item genericJSON) {
-		pathkeys := pathkeys.withKey("story_id", getNumericKey(item, "id"))
+	visitList("/projects/{project_id}/labels", pathkeys, "", nil)
+	visitList("/projects/{project_id}/memberships", pathkeys, "", nil)
+	d.visitPaginated("/projects/{project_id}/releases", pathkeys, 10, ":default,story_ids", nil)
+	d.visitPaginated("/projects/{project_id}/iterations", pathkeys, 10, "", nil)
+	visitList("/projects/{project_id}/epics", pathkeys, ":default,comments(:default,file_attachments,google_attachments,attachment_ids)", foreach(func(item genericJSON) {
+		// pathkeys := pathkeys.withKey("epic_id", getNumericKey(item, "id"))
+		d.handleCommentAttachments(item)
 
-		if len(getListFieldValue(item, "comment_ids")) > 0 {
-			visitList("/projects/{project_id}/stories/{story_id}/comments", pathkeys, ":default,file_attachments,google_attachments,attachment_ids", foreach(func(item genericJSON) {
-				for _, attachment := range getListFieldValue(item, "file_attachments") {
-					filename, ok := getFieldValue(attachment, "filename")
-					if !ok {
-						log.Fatalf("could not get attachment filename")
-					}
-					downloadUrl, ok := getFieldValue(attachment, "download_url")
-					if !ok {
-						log.Fatalf("could not get attachment download url")
-					}
-					attachmentID, ok := getFieldValue(attachment, "id")
-					if !ok {
-						log.Fatalf("could not get attachment id")
-					}
-					attachmentIDStr := fmt.Sprintf("%d", int64(attachmentID.(float64)))
-					logger.Printf("attachment detected: %q %q %v", filename, downloadUrl, attachmentIDStr)
-				}
-			}))
-		}
-		visitList("/projects/{project_id}/stories/{story_id}/owners", pathkeys, "", foreach(func(item genericJSON) {
-			//pathkeys := pathkeys.withKey("person_id", getNumericKey(item, "id"))
-			//visitObject("/projects/{project_id}/stories/{story_id}/owners/{person_id}", pathkeys, nil)
-		}))
-		visitList("/projects/{project_id}/stories/{story_id}/reviews", pathkeys, "", foreach(func(item genericJSON) {
-			pathkeys := pathkeys.withKey("review_id", getNumericKey(item, "id"))
-			visitObject("/projects/{project_id}/stories/{story_id}/reviews/{review_id}", pathkeys, "", nil)
-		}))
-		visitList("/projects/{project_id}/stories/{story_id}/tasks", pathkeys, "", foreach(func(item genericJSON) {
-			pathkeys := pathkeys.withKey("task_id", getNumericKey(item, "id"))
-			visitObject("/projects/{project_id}/stories/{story_id}/tasks/{task_id}", pathkeys, "", nil)
-		}))
-		visitList("/projects/{project_id}/stories/{story_id}/transitions", pathkeys, "", nil)
-		visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, "", nil)
-		visitList("/projects/{project_id}/stories/{story_id}/blockers", pathkeys, "", foreach(func(item genericJSON) {
-			pathkeys := pathkeys.withKey("blocker_id", getNumericKey(item, "id"))
-			visitObject("/projects/{project_id}/stories/{story_id}/blockers/{blocker_id}", pathkeys, "", nil)
-		}))
-		visitList("/projects/{project_id}/stories/{story_id}/labels", pathkeys, "", foreach(func(item genericJSON) {
-			//pathkeys := pathkeys.withKey("label_id", getNumericKey(item, "id"))
-			// giving 404?
-			// visitObject("/projects/{project_id}/stories/{story_id}/labels/{label_id}", pathkeys, nil)
-		}))
+		// d.visitPaginated("/projects/{project_id}/epics/{epic_id}/activity", pathkeys, 10, "", nil)
+	}))
+	d.visitPaginated("/projects/{project_id}/stories", pathkeys, 10, ":default,comments(:default,file_attachments,google_attachments,attachment_ids),owners(:default),reviews(:default),tasks(:default),transitions(:default),blockers(:default),labels(:default)", foreach(func(item genericJSON) {
+		// pathkeys := pathkeys.withKey("story_id", getNumericKey(item, "id"))
+
+		d.handleCommentAttachments(item)
+		// visitList("/projects/{project_id}/stories/{story_id}/activity", pathkeys, "", nil)
 	}))
 	completionChecker.report()
 	d.save(cacheFile)
@@ -294,6 +237,27 @@ func (d *Downloader) dumpCopies(outDir string) {
 			return content.Data
 		})
 		saveAsJSON(contents, filepath.Join(outDir, fileName))
+	}
+}
+
+func (d *Downloader) handleCommentAttachments(itemWithComments genericJSON) {
+	for _, comment := range getListFieldValue(itemWithComments, "comments") {
+		for _, attachment := range getListFieldValue(comment, "file_attachments") {
+			filename, ok := getFieldValue(attachment, "filename")
+			if !ok {
+				log.Fatalf("could not get attachment filename")
+			}
+			downloadUrl, ok := getFieldValue(attachment, "download_url")
+			if !ok {
+				log.Fatalf("could not get attachment download url")
+			}
+			attachmentID, ok := getFieldValue(attachment, "id")
+			if !ok {
+				log.Fatalf("could not get attachment id")
+			}
+			attachmentIDStr := fmt.Sprintf("%d", int64(attachmentID.(float64)))
+			logger.Printf("attachment detected: %q %q %v", filename, downloadUrl, attachmentIDStr)
+		}
 	}
 }
 
