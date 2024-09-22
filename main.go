@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	resty "github.com/go-resty/resty/v2"
-	"github.com/samber/lo"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +9,9 @@ import (
 	"regexp"
 	"syscall"
 	"time"
+
+	resty "github.com/go-resty/resty/v2"
+	"github.com/samber/lo"
 )
 
 var logger = log.New(os.Stdout, "", log.LstdFlags)
@@ -80,8 +81,8 @@ func (pk PathKeys) withKey(key, value string) PathKeys {
 }
 
 type DownloadedContent struct {
-	url          string
 	pathTemplate string
+	keys         PathKeys
 	PathKeys     PathKeys
 	Data         any
 }
@@ -96,8 +97,8 @@ func (d *Downloader) visitPaginated(path string, keys PathKeys, downstreamHandle
 		return
 	}
 
-	contents, url := fetchPaginated(d.getRequest(keys), path)
-	d.addResult(path, url, contents)
+	contents := fetchPaginated(d.getRequest(keys), path)
+	d.addResult(path, keys, contents)
 
 	downstreamHandler(contents)
 }
@@ -109,7 +110,7 @@ func (d *Downloader) visitList(path string, keys PathKeys, downstreamHandler fun
 	var resp []genericJSON
 
 	getWithRetries(d.getRequest(keys), path)
-	d.addResult(path, req.URL, resp)
+	d.addResult(path, keys, resp)
 	downstreamHandler(resp)
 }
 
@@ -120,16 +121,16 @@ func (d *Downloader) visitObject(path string, keys PathKeys, downstreamHandler f
 	var resp genericJSON
 
 	getWithRetries(d.getRequest(keys), path)
-	d.addResult(path, req.URL, resp)
+	d.addResult(path, keys, resp)
 
 	if downstreamHandler != nil {
 		downstreamHandler(resp)
 	}
 }
 
-func (d *Downloader) addResult(requestTemplate string, requestURL string, response any) {
+func (d *Downloader) addResult(requestTemplate string, keys PathKeys, response any) {
 	d.downloadedData = append(d.downloadedData, DownloadedContent{
-		url:          requestURL,
+		keys:         keys,
 		pathTemplate: requestTemplate,
 		Data:         response,
 	})
@@ -204,7 +205,7 @@ var completionChecker = newCompletionChecker()
 
 type genericJSON map[string]any
 
-func fetchPaginated(req *resty.Request, path string) ([]genericJSON, string) {
+func fetchPaginated(req *resty.Request, path string) []genericJSON {
 	type paginatedResponse struct {
 		Pagination struct {
 			Total    int `json:"total"`
@@ -215,7 +216,6 @@ func fetchPaginated(req *resty.Request, path string) ([]genericJSON, string) {
 		Data []genericJSON `json:"data"`
 	}
 
-	firstUrl := ""
 	var result []genericJSON
 	done := false
 	for !done {
@@ -228,10 +228,6 @@ func fetchPaginated(req *resty.Request, path string) ([]genericJSON, string) {
 
 		getWithRetries(req, path)
 
-		if firstUrl == "" {
-			firstUrl = req.URL
-		}
-
 		result = append(result, respBody.Data...)
 		logger.Printf("fetched %d/%d\n", len(result), respBody.Pagination.Total)
 		done = len(result) == respBody.Pagination.Total
@@ -239,7 +235,7 @@ func fetchPaginated(req *resty.Request, path string) ([]genericJSON, string) {
 			break
 		}
 	}
-	return result, firstUrl
+	return result
 }
 
 func getWithRetries(req *resty.Request, path string) {
