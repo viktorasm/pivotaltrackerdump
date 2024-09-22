@@ -66,6 +66,10 @@ var allTrackerAPIEndpoints = []string{
 	"/projects/{project_id}/webhooks/{webhook_id}",
 }
 var ignoredEndpoints = []string{
+	"/projects/{project_id}/generic_integrations",
+	"/projects/{project_id}/generic_integrations/{integration_id}",
+	"/projects/{project_id}/webhooks",
+	"/projects/{project_id}/webhooks/{webhook_id}",
 	"/projects/{project_id}/export",
 	"/projects/{project_id}/search",
 	"/projects/{project_id}/stories/bulk",

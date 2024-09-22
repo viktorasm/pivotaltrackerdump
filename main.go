@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/davecgh/go-spew/spew"
 	resty "github.com/go-resty/resty/v2"
 	"github.com/samber/lo"
 	"log"
@@ -10,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"time"
 )
 
@@ -37,6 +37,11 @@ func main() {
 	client.SetBaseURL("https://www.pivotaltracker.com/services/v5/projects/" + projectID)
 	client.Header.Set("X-TrackerToken", trackerToken)
 
+	simpleObject := func(path string) ContentsFetcher[genericJSON] {
+		return func() *FetchedContents[genericJSON] {
+			return fetchSimple[genericJSON](client, path)
+		}
+	}
 	simpleList := func(path string) ContentsFetcher[[]genericJSON] {
 		return func() *FetchedContents[[]genericJSON] {
 			return fetchSimple[[]genericJSON](client, path)
@@ -47,27 +52,33 @@ func main() {
 			return fetchPaginated(client, path)
 		}
 	}
-	sublistByKey := func(parents []genericJSON, parentKey string, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
+	sublistByKey := func(path string, parentIDs [][]string, parentParam ...string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
 		return func() *FetchedContents[[]Subcontent[[]genericJSON]] {
-			return getSubcontent[[]genericJSON](client, parents, path, parentKey, parentParam)
+			return getSubcontent[[]genericJSON](client, path, parentIDs, parentParam...)
 		}
 	}
-	subObjectByKey := func(parents []genericJSON, parentKey string, path string, pathParam string) ContentsFetcher[[]Subcontent[genericJSON]] {
+	subObjectByKey := func(path string, parentIDs [][]string, pathParam ...string) ContentsFetcher[[]Subcontent[genericJSON]] {
 		return func() *FetchedContents[[]Subcontent[genericJSON]] {
-			return getSubcontent[genericJSON](client, parents, path, parentKey, pathParam)
+			return getSubcontent[genericJSON](client, path, parentIDs, pathParam...)
 		}
+	}
+	parentIDs := func(parents []genericJSON, key string) [][]string {
+		return lo.Map(parents, func(item genericJSON, _ int) []string {
+			return []string{getNumericKey(item, key)}
+		})
 	}
 	sublist := func(parents []genericJSON, path string, parentParam string) ContentsFetcher[[]Subcontent[[]genericJSON]] {
-		return sublistByKey(parents, "id", path, parentParam)
+		return sublistByKey(path, parentIDs(parents, "id"), parentParam)
 	}
 	out := func(file string) string {
 		return filepath.Join(outDir, file)
 	}
 
+	persistJson(simpleObject(""), out("project.json"))()
 	{
 		var stories []genericJSON
 		capture(persistJson(paginatedList("/stories"), out("stories.json")), &stories)()
-		persistJson(subObjectByKey(stories, "id", "/stories/{storyID}", "storyID"), out("story_details.json"))()
+		persistJson(subObjectByKey("/stories/{storyID}", parentIDs(stories, "id"), "storyID"), out("story_details.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/tasks", "storyID"), out("story_tasks.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/owners", "storyID"), out("story_owners.json"))()
 		persistJson(sublist(stories, "/stories/{storyID}/comments", "storyID"), out("story_comments.json"))()
@@ -88,6 +99,7 @@ func main() {
 	{
 		var releases []genericJSON
 		capture(persistJson(paginatedList("/releases"), out("releases.json")), &releases)()
+		persistJson(subObjectByKey("/releases/{id}", parentIDs(releases, "id"), "id"), out("release_details.json"))()
 		persistJson(sublist(releases, "/releases/{id}/stories", "id"), out("releases_stories.json"))()
 		persistJson(simpleList("/labels"), out("labels.json"))()
 	}
@@ -95,6 +107,7 @@ func main() {
 	{
 		var epics []genericJSON
 		capture(persistJson(simpleList("/epics"), out("epics.json")), &epics)()
+		persistJson(subObjectByKey("/epics/{id}", parentIDs(epics, "id"), "id"), out("epic_details.json"))()
 		persistJson(sublist(epics, "/epics/{epic_id}/comments", "epic_id"), out("epic_comments.json"))()
 		persistJson(sublist(epics, "/epics/{epic_id}/activity", "epic_id"), out("epic_activity.json"))()
 	}
@@ -266,11 +279,15 @@ func fetchSimple[T any](client *resty.Client, path string, requestFn ...requestF
 }
 
 type Subcontent[T any] struct {
-	ParentID int64
-	Data     T
+	ParentIDs []string
+	Data      T
 }
 
-func getSubcontent[T any](client *resty.Client, parents []genericJSON, path string, parentKey, parentParam string) *FetchedContents[[]Subcontent[T]] {
+func getNumericKey(obj genericJSON, key string) string {
+	return fmt.Sprintf("%d", int64(obj[key].(float64)))
+}
+
+func getSubcontent[T any](client *resty.Client, path string, parents [][]string, parentParams ...string) *FetchedContents[[]Subcontent[T]] {
 	//goland:noinspection GoBoolExpressions
 	if DEBUG && len(parents) > 3 {
 		parents = parents[:3]
@@ -280,17 +297,19 @@ func getSubcontent[T any](client *resty.Client, parents []genericJSON, path stri
 		SavedDate: time.Now(),
 	}
 
-	result.Data = lo.Map(parents, func(parent genericJSON, index int) Subcontent[T] {
-		parentID := int64(parent[parentKey].(float64))
-		fmt.Printf("\rfetching items (%d/%d), parent ID %d", index+1, len(parents), parentID)
+	result.Data = lo.Map(parents, func(parentKeyValues []string, index int) Subcontent[T] {
+		fmt.Printf("\rfetching items (%d/%d), parent IDs %v", index+1, len(parents), spew.NewFormatter(parentKeyValues))
 
-		subcontent := fetchSimple[T](client, path, withPathParam(parentParam, strconv.FormatInt(parentID, 10)))
+		params := lo.Map(parentParams, func(key string, index int) requestFn {
+			return withPathParam(key, parentKeyValues[index])
+		})
+		subcontent := fetchSimple[T](client, path, params...)
 
 		result.Sources = append(result.Sources, subcontent.Sources...)
 
 		return Subcontent[T]{
-			ParentID: parentID,
-			Data:     subcontent.Data,
+			ParentIDs: parentKeyValues,
+			Data:      subcontent.Data,
 		}
 	})
 	return &result
