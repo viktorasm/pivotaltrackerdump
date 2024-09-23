@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"pivotaltrackerexport/clickup"
 	"pivotaltrackerexport/tracker"
 )
 
@@ -23,12 +24,6 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	projectID := os.Getenv("TRACKER_PROJECT")
-	trackerToken := os.Getenv("TRACKER_TOKEN")
-	if projectID == "" || trackerToken == "" {
-		logger.Fatalf("supply TRACKER_PROJECT and TRACKER_TOKEN as env variables first")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	handleInterruptSignals(func() {
@@ -36,7 +31,18 @@ func main() {
 		logger.Println("cancel requested, stopping...")
 	})
 
-	tracker.Export(ctx, trackerToken, projectID, outDir)
+	trackerProject := os.Getenv("TRACKER_PROJECT")
+	trackerToken := os.Getenv("TRACKER_TOKEN")
+	clickupToken := os.Getenv("CLICKUP_TOKEN")
+	if trackerProject != "" && trackerToken != "" {
+		logger.Println("TRACKER_PROJECT and TRACKER_TOKEN detected, doing tracker export")
+		tracker.Export(ctx, trackerToken, trackerProject, outDir)
+	}
+
+	if clickupToken != "" {
+		logger.Println("CLICKUP_TOKEN detected, doing clickup import")
+		clickup.Import(ctx, clickupToken)
+	}
 
 	logger.Println("done")
 }
