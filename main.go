@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -231,7 +232,7 @@ func (d *Downloader) dumpCopies(outDir string) {
 
 	nonAlphanumericRe := regexp.MustCompile("[^a-zA-Z0-9]+")
 	for pathTemplate, group := range groups {
-		fileName := nonAlphanumericRe.ReplaceAllString(pathTemplate, "_")
+		fileName := strings.Trim(nonAlphanumericRe.ReplaceAllString(pathTemplate, "_"), "_") + ".json"
 		contents := lo.Map(group, func(content *DownloadedContent, _ int) any {
 			return content.Data
 		})
